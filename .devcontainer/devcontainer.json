@@ -1,11 +1,7 @@
 {
   "name": "R Assistant Tool",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
-  "features": {
-    "ghcr.io/devcontainers/features/r-lang:1": {},
-    "ghcr.io/devcontainers/features/pandoc:1": {}
-  },
-  "postCreateCommand": "pip install -r requirements.txt",
+  "postCreateCommand": "apt-get update && apt-get install -y r-base pandoc && pip install -r requirements.txt",
   "forwardPorts": [8000],
   "portsAttributes": {
     "8000": {
