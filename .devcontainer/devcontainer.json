@@ -2,7 +2,15 @@
   "name": "R Assistant Tool",
   "image": "mcr.microsoft.com/devcontainers/python:3.11",
   "features": {
-    "ghcr.io/devcontainers/features/r-lang:1": {}
+    "ghcr.io/devcontainers/features/r-apt:1": {
+      "version": "latest"
+    }
   },
-  "postCreateCommand": "pip install -r requirements.txt"
+  "postCreateCommand": "pip install -r requirements.txt && Rscript -e \"options(repos = c(CRAN = 'https://cran.rstudio.com/')); install.packages(c('rmarkdown', 'knitr', 'tinytex'))\"",
+  "forwardPorts": [8000],
+  "portsAttributes": {
+    "8000": {
+      "label": "FastAPI Server"
+    }
+  }
 }
