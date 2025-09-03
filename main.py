@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import List, Optional
 import logging
-from openai import OpenAI
+import google.generativeai as genai
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -20,8 +20,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Initialize Google Generative AI
+genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 app = FastAPI(title="R Chat Assistant Tool", description="Chat with AI to analyze CSV data using R")
 
@@ -260,7 +261,7 @@ async def upload_csv(file: UploadFile = File(...)):
 
 @app.post("/chat")
 async def chat_with_ai(chat_msg: ChatMessage):
-    """Chat endpoint - generates R code using OpenAI and executes it"""
+    """Chat endpoint - generates R code using Google Generative AI and executes it"""
     
     session_id = chat_msg.session_id
     user_message = chat_msg.message
@@ -276,8 +277,17 @@ async def chat_with_ai(chat_msg: ChatMessage):
     session["chat_history"].append({"role": "user", "content": user_message})
     
     try:
-        # Generate R code using OpenAI
-        r_code = await generate_r_code_with_openai(user_message, file_info, session["chat_history"])
+        # Check if Google API key is configured
+        api_key = os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            logger.error("GOOGLE_API_KEY not found in environment variables")
+            return ChatResponse(
+                response="Google API key not configured. Please check your environment variables.",
+                error="Missing GOOGLE_API_KEY"
+            )
+        
+        # Generate R code using Google Generative AI
+        r_code = await generate_r_code_with_gemini(user_message, file_info, session["chat_history"])
         
         if not r_code:
             return ChatResponse(
@@ -310,10 +320,12 @@ async def chat_with_ai(chat_msg: ChatMessage):
     
     except Exception as e:
         logger.error(f"Chat error: {str(e)}")
+        import traceback
+        logger.error(f"Full traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Chat processing error: {str(e)}")
 
-async def generate_r_code_with_openai(user_message: str, file_info: dict, chat_history: list) -> str:
-    """Generate R code using OpenAI GPT-4"""
+async def generate_r_code_with_gemini(user_message: str, file_info: dict, chat_history: list) -> str:
+    """Generate R code using Google Generative AI (Gemini)"""
     try:
         # Prepare context about the dataset
         dataset_context = f"""
@@ -358,23 +370,26 @@ Previous conversation context:
 
 Generate ONLY the R code, no additional explanation."""
 
-        # Call OpenAI API
-        response = client.chat.completions.create(
-            model="gpt-4",  # Change to "o3-mini" when available
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Please generate R code for this request: {user_message}"}
-            ],
-            max_tokens=1000,
-            temperature=0.3  # Lower temperature for more consistent code generation
+        # Create the full prompt
+        full_prompt = f"{system_prompt}\n\nPlease generate R code for this request: {user_message}"
+        
+        # Call Google Generative AI
+        response = model.generate_content(
+            full_prompt,
+            generation_config=genai.types.GenerationConfig(
+                max_output_tokens=1000,
+                temperature=0.3,  # Lower temperature for more consistent code generation
+            )
         )
         
-        r_code = response.choices[0].message.content.strip()
+        r_code = response.text.strip()
         
         # Clean up the code (remove markdown formatting if present)
         if r_code.startswith("```r"):
             r_code = r_code[4:]
-        if r_code.startswith("```"):
+        elif r_code.startswith("```R"):
+            r_code = r_code[4:]
+        elif r_code.startswith("```"):
             r_code = r_code[3:]
         if r_code.endswith("```"):
             r_code = r_code[:-3]
@@ -382,12 +397,12 @@ Generate ONLY the R code, no additional explanation."""
         return r_code.strip()
     
     except Exception as e:
-        logger.error(f"OpenAI API error: {str(e)}")
+        logger.error(f"Google Generative AI error: {str(e)}")
         # Fallback to simple rule-based generation
         return generate_fallback_r_code(user_message, file_info)
 
 def generate_fallback_r_code(user_message: str, file_info: dict) -> str:
-    """Fallback R code generation when OpenAI fails"""
+    """Fallback R code generation when Google Generative AI fails"""
     message_lower = user_message.lower()
     filename = file_info["filename"]
     

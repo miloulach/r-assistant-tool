@@ -4,3 +4,4 @@ python-multipart
 openai
 pandas
 python-dotenv
+google-generativeai
