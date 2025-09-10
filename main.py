@@ -1,5 +1,6 @@
+import subprocess
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 import pandas as pd
 import subprocess
@@ -24,11 +25,19 @@ logger = logging.getLogger(__name__)
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel('gemini-1.5-flash')
 
+
+# Ensure R packages are installed
+def ensure_r_packages():
+    subprocess.run(["Rscript", "install_packages.R"], check=True)
+
+ensure_r_packages()
+
 app = FastAPI(title="R Chat Assistant Tool", description="Chat with AI to analyze CSV data using R")
 
 # Create directories
 Path("uploads").mkdir(exist_ok=True)
 Path("results").mkdir(exist_ok=True)
+Path("plots").mkdir(exist_ok=True)
 
 # Store chat sessions and current CSV info
 chat_sessions = {}
@@ -42,6 +51,7 @@ class ChatResponse(BaseModel):
     r_code: Optional[str] = None
     execution_result: Optional[dict] = None
     error: Optional[str] = None
+    plot_filename: Optional[str] = None
 
 @app.get("/", response_class=HTMLResponse)
 async def main():
@@ -185,6 +195,11 @@ async def main():
                         if (result.execution_result) {
                             if (result.execution_result.success) {
                                 responseHtml += `<div class="result-block">📊 Results:<br><pre>${result.execution_result.output}</pre></div>`;
+                                
+                                // Add plot if available
+                                if (result.plot_filename) {
+                                    responseHtml += `<div class="result-block">📈 Generated Plot:<br><img src="/plots/${result.plot_filename}" style="max-width: 100%; height: auto;" alt="Generated plot"></div>`;
+                                }
                             } else {
                                 responseHtml += `<div class="error-block">❌ Execution Error:<br><pre>${result.execution_result.error}</pre></div>`;
                             }
@@ -298,8 +313,15 @@ async def chat_with_ai(chat_msg: ChatMessage):
         # Execute the R code
         execution_result = await execute_r_code_internal(r_code, file_info["path"])
         
-        # Generate response
+        # Generate response and check for plots
+        plot_filename = None
         if execution_result["success"]:
+            # Check if a plot was created
+            output = execution_result["output"]
+            if "PLOT_CREATED:" in output:
+                plot_match = re.search(r"PLOT_CREATED: (plots/[^\s]+)", output)
+                if plot_match:
+                    plot_filename = plot_match.group(1).split('/')[-1]  # Get just the filename
             response_text = f"I've analyzed your data! Here's what I found:"
         else:
             response_text = f"I generated R code but encountered an error during execution. Let me show you what happened:"
@@ -315,7 +337,8 @@ async def chat_with_ai(chat_msg: ChatMessage):
         return ChatResponse(
             response=response_text,
             r_code=r_code,
-            execution_result=execution_result
+            execution_result=execution_result,
+            plot_filename=plot_filename
         )
     
     except Exception as e:
@@ -442,16 +465,29 @@ async def execute_r_code_internal(r_code: str, csv_path: str) -> dict:
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.R', delete=False) as temp_r_file:
         r_script_content = f"""
-# Set working directory
+# Set working directory and create plots directory
 setwd('/workspaces/r-assistant-tool')
+dir.create('plots', showWarnings = FALSE)
 
 # Load required libraries quietly
 suppressPackageStartupMessages({{
     library(utils)
 }})
 
+# Capture plots
+plot_file <- paste0('plots/plot_', format(Sys.time(), '%Y%m%d_%H%M%S'), '.png')
+png(plot_file, width = 800, height = 600)
+
 # User's R code
 {r_code}
+
+# Close plot device
+dev.off()
+
+# Check if plot was created
+if (file.exists(plot_file)) {{
+    cat("\\nPLOT_CREATED:", plot_file, "\\n")
+}}
 """
         temp_r_file.write(r_script_content)
         temp_r_script_path = temp_r_file.name
@@ -488,6 +524,15 @@ suppressPackageStartupMessages({{
             "error": f"Execution error: {str(e)}",
             "return_code": -1
         }
+
+@app.get("/plots/{filename}")
+async def get_plot(filename: str):
+    """Serve plot images"""
+    plot_path = f"plots/{filename}"
+    if not os.path.exists(plot_path):
+        raise HTTPException(status_code=404, detail="Plot not found")
+    
+    return FileResponse(plot_path, media_type="image/png")
 
 @app.get("/sessions/{session_id}/history")
 async def get_chat_history(session_id: str):
