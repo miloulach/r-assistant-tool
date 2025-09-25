@@ -3,7 +3,7 @@
 
 packages <- c(
   "ggplot2", "dplyr", "lmtest", "sandwich", "tidyr", "readr", 
-  "plm", "AER", "tseries", "vars", "dynlm", "forecast", "quantmod",
+  "plm", "AER", "tseries", "vars", "dynlm", "forecast", "quantmod", 
   "tsbox", "xts", "car", "MASS", "lme4", "gmm", 
   "VGAM", "tidyverse", "lubridate", "pglm", "lattice", "glmmTMB", 
   "nlme", "broom", "easystats", "performance", "censReg", "aods3", 
@@ -12,9 +12,8 @@ packages <- c(
   "plmtest", "splm", "fixest", "lfe", "bife", "stargazer", 
   "gtsummary", "feols", "tsDyn", "tidyquant", 
   "quantmod", "xtsExtra", "forecastHybrid", "parsnip", "rsample", 
-  "caret", "mlr3", "xgboost", "randomForest", "e1071", "keras", 
-  "h2o", "ggResidpanel", "visreg", "plotly", "shinystan", "rstanarm", 
-  "brms", "bayesplot", "loo"
+  "caret", "mlr3", "xgboost", "randomForest", "e1071", 
+  "ggResidpanel", "visreg", "plotly"
 )
 
 

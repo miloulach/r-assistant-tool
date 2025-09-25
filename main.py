@@ -1,3 +1,6 @@
+import asyncio
+import threading
+from mcp_tools import setup_mcp_integration
 import subprocess
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
@@ -562,6 +565,16 @@ async def list_uploaded_files():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing files: {str(e)}")
 
+# Import the simplified MCP tools
+from mcp_tools import setup_mcp_integration
+
+# Add MCP integration to your existing app
+mcp_setup_success = setup_mcp_integration(app, execute_r_code_internal, chat_sessions)
+
+if mcp_setup_success:
+    logger.info("✅ MCP endpoints available at: /mcp/tools, /mcp/call/{tool_name}, /mcp/info")
+else:
+    logger.warning("❌ MCP integration failed - continuing without MCP support")
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
