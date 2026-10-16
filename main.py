@@ -1,8 +1,8 @@
 import asyncio
 import threading
-from mcp_tools import setup_mcp_integration
+import secrets
 import subprocess
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Header, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 import pandas as pd
@@ -29,18 +29,90 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 model = genai.GenerativeModel('gemini-2.0-flash')
 
 
+# Paths are resolved from this file so the app works from any working directory
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+PLOTS_DIR = BASE_DIR / "plots"
+RESULTS_DIR = BASE_DIR / "results"
+
+# Optional key for the web endpoints; MCP code execution is disabled unless it is set
+API_KEY = os.getenv("APP_API_KEY")
+
+# Resource limits for each R process
+R_TIMEOUT_SECONDS = int(os.getenv("R_TIMEOUT_SECONDS", "30"))
+R_MAX_MEMORY_MB = int(os.getenv("R_MAX_MEMORY_MB", "2048"))
+R_MAX_FILE_MB = int(os.getenv("R_MAX_FILE_MB", "100"))
+
+
+def _key_matches(provided: Optional[str]) -> bool:
+    return bool(API_KEY and provided and secrets.compare_digest(provided, API_KEY))
+
+
+async def require_api_key(x_api_key: Optional[str] = Header(default=None)):
+    """Protect web endpoints when APP_API_KEY is configured"""
+    if API_KEY and not _key_matches(x_api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+async def require_mcp_api_key(x_api_key: Optional[str] = Header(default=None)):
+    """MCP tools run arbitrary R code, so they always require a key"""
+    if not API_KEY:
+        raise HTTPException(status_code=403, detail="MCP tool calls are disabled. Set APP_API_KEY to enable them.")
+    if not _key_matches(x_api_key):
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+def safe_csv_filename(filename: Optional[str]) -> str:
+    """Strip directories and unsafe characters from an uploaded file name"""
+    base = Path(filename or "").name
+    if not base.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only CSV files are allowed")
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", base[:-4]).strip("._") or "data"
+    return f"{stem[:100]}.csv"
+
+
+def resolve_inside(directory: Path, filename: str) -> Path:
+    """Return directory/filename only if it stays inside directory"""
+    directory = directory.resolve()
+    path = (directory / filename).resolve()
+    if path.parent != directory:
+        raise HTTPException(status_code=404, detail="File not found")
+    return path
+
+
+def _r_sandbox_env() -> dict:
+    """Minimal environment for R so secrets such as GOOGLE_API_KEY are not exposed"""
+    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "R_HOME", "R_LIBS", "R_LIBS_USER", "R_LIBS_SITE")
+    return {k: os.environ[k] for k in keep if k in os.environ}
+
+
+def _limit_r_resources():
+    """Applied in the child process before R starts (POSIX only)"""
+    import resource
+    limits = [
+        (resource.RLIMIT_CPU, R_TIMEOUT_SECONDS),
+        (resource.RLIMIT_AS, R_MAX_MEMORY_MB * 1024 * 1024),
+        (resource.RLIMIT_FSIZE, R_MAX_FILE_MB * 1024 * 1024),
+    ]
+    for limit, value in limits:
+        try:
+            resource.setrlimit(limit, (value, value))
+        except (ValueError, OSError):
+            pass
+
+
 # Ensure R packages are installed
 def ensure_r_packages():
-    subprocess.run(["Rscript", "install_packages.R"], check=True)
+    subprocess.run(["Rscript", "install_packages.R"], check=True, cwd=BASE_DIR)
 
 ensure_r_packages()
 
 app = FastAPI(title="R Chat Assistant Tool", description="Chat with AI to analyze CSV data using R")
 
 # Create directories
-Path("uploads").mkdir(exist_ok=True)
-Path("results").mkdir(exist_ok=True)
-Path("plots").mkdir(exist_ok=True)
+UPLOAD_DIR.mkdir(exist_ok=True)
+RESULTS_DIR.mkdir(exist_ok=True)
+PLOTS_DIR.mkdir(exist_ok=True)
 
 # Store chat sessions and current CSV info
 chat_sessions = {}
@@ -91,6 +163,7 @@ async def main():
                 <input type="file" id="csvFile" accept=".csv">
                 <button onclick="uploadFile()">Upload</button>
                 <div id="fileInfo"></div>
+                <p><input type="password" id="apiKey" placeholder="API key (if required)" style="width: 90%; padding: 8px;"></p>
                 
                 <h3>💡 Example Prompts:</h3>
                 <ul>
@@ -118,6 +191,24 @@ async def main():
         <script>
             let currentFile = null;
             
+            function escapeHtml(value) {
+                return String(value ?? '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+            }
+            
+            function authHeaders(extra = {}) {
+                const key = document.getElementById('apiKey').value;
+                return key ? { ...extra, 'X-API-Key': key } : extra;
+            }
+            
+            function errorDetail(result) {
+                return typeof result.detail === 'string' ? result.detail : JSON.stringify(result.detail);
+            }
+            
             async function uploadFile() {
                 const fileInput = document.getElementById('csvFile');
                 const file = fileInput.files[0];
@@ -133,6 +224,7 @@ async def main():
                 try {
                     const response = await fetch('/upload-csv', {
                         method: 'POST',
+                        headers: authHeaders(),
                         body: formData
                     });
                     
@@ -142,14 +234,14 @@ async def main():
                         currentFile = result.filename;
                         document.getElementById('fileInfo').innerHTML = `
                             <div class="file-info">
-                                <strong>✅ File uploaded:</strong> ${result.filename}<br>
-                                <strong>Rows:</strong> ${result.rows}<br>
-                                <strong>Columns:</strong> ${result.columns.join(', ')}
+                                <strong>✅ File uploaded:</strong> ${escapeHtml(result.filename)}<br>
+                                <strong>Rows:</strong> ${escapeHtml(result.rows)}<br>
+                                <strong>Columns:</strong> ${escapeHtml(result.columns.join(', '))}
                             </div>
                         `;
-                        addMessage('system', `File "${result.filename}" uploaded successfully! You can now ask me questions about your data.`);
+                        addMessage('system', `File "${escapeHtml(result.filename)}" uploaded successfully! You can now ask me questions about your data.`);
                     } else {
-                        alert('Upload failed: ' + result.detail);
+                        alert('Upload failed: ' + errorDetail(result));
                     }
                 } catch (error) {
                     alert('Upload error: ' + error.message);
@@ -175,7 +267,7 @@ async def main():
                 try {
                     const response = await fetch('/chat', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: authHeaders({ 'Content-Type': 'application/json' }),
                         body: JSON.stringify({
                             message: message,
                             session_id: 'default'
@@ -189,33 +281,33 @@ async def main():
                     chatBox.removeChild(chatBox.lastChild);
                     
                     if (response.ok) {
-                        let responseHtml = result.response;
+                        let responseHtml = escapeHtml(result.response);
                         
                         if (result.r_code) {
-                            responseHtml += `<div class="code-block">📝 Generated R Code:<br><pre>${result.r_code}</pre></div>`;
+                            responseHtml += `<div class="code-block">📝 Generated R Code:<br><pre>${escapeHtml(result.r_code)}</pre></div>`;
                         }
                         
                         if (result.execution_result) {
                             if (result.execution_result.success) {
-                                responseHtml += `<div class="result-block">📊 Results:<br><pre>${result.execution_result.output}</pre></div>`;
+                                responseHtml += `<div class="result-block">📊 Results:<br><pre>${escapeHtml(result.execution_result.output)}</pre></div>`;
                                 
                                 // Add plot if available
                                 if (result.plot_filename) {
-                                    responseHtml += `<div class="result-block">📈 Generated Plot:<br><img src="/plots/${result.plot_filename}" style="max-width: 100%; height: auto;" alt="Generated plot"></div>`;
+                                    responseHtml += `<div class="result-block">📈 Generated Plot:<br><img src="/plots/${encodeURIComponent(result.plot_filename)}" style="max-width: 100%; height: auto;" alt="Generated plot"></div>`;
                                 }
                             } else {
-                                responseHtml += `<div class="error-block">❌ Execution Error:<br><pre>${result.execution_result.error}</pre></div>`;
+                                responseHtml += `<div class="error-block">❌ Execution Error:<br><pre>${escapeHtml(result.execution_result.error)}</pre></div>`;
                             }
                         }
                         
                         addMessage('assistant', responseHtml);
                     } else {
-                        addMessage('assistant', '❌ Error: ' + result.detail);
+                        addMessage('assistant', '❌ Error: ' + escapeHtml(errorDetail(result)));
                     }
                 } catch (error) {
                     const chatBox = document.getElementById('chatBox');
                     chatBox.removeChild(chatBox.lastChild);
-                    addMessage('assistant', '❌ Connection error: ' + error.message);
+                    addMessage('assistant', '❌ Connection error: ' + escapeHtml(error.message));
                 }
             }
             
@@ -238,13 +330,11 @@ async def main():
     </html>
     """
 
-@app.post("/upload-csv")
+@app.post("/upload-csv", dependencies=[Depends(require_api_key)])
 async def upload_csv(file: UploadFile = File(...)):
     """Upload a CSV file for analysis"""
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Only CSV files are allowed")
-    
-    file_path = f"uploads/{file.filename}"
+    filename = safe_csv_filename(file.filename)
+    file_path = str(resolve_inside(UPLOAD_DIR, filename))
     
     try:
         contents = await file.read()
@@ -256,7 +346,7 @@ async def upload_csv(file: UploadFile = File(...)):
         
         # Store file info in session
         file_info = {
-            "filename": file.filename,
+            "filename": filename,
             "path": file_path,
             "rows": len(df),
             "columns": list(df.columns),
@@ -277,7 +367,7 @@ async def upload_csv(file: UploadFile = File(...)):
             os.remove(file_path)
         raise HTTPException(status_code=400, detail=f"Error processing CSV: {str(e)}")
 
-@app.post("/chat")
+@app.post("/chat", dependencies=[Depends(require_api_key)])
 async def chat_with_ai(chat_msg: ChatMessage):
     """Chat endpoint - generates R code using Google Generative AI and executes it"""
     
@@ -468,8 +558,7 @@ async def execute_r_code_internal(r_code: str, csv_path: str) -> dict:
     
     with tempfile.NamedTemporaryFile(mode='w', suffix='.R', delete=False) as temp_r_file:
         r_script_content = f"""
-# Set working directory and create plots directory
-setwd('/workspaces/r-assistant-tool')
+# Working directory is set by the caller (project root)
 dir.create('plots', showWarnings = FALSE)
 
 # Load required libraries quietly
@@ -500,7 +589,10 @@ if (file.exists(plot_file)) {{
             ['Rscript', temp_r_script_path],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=R_TIMEOUT_SECONDS,
+            cwd=BASE_DIR,
+            env=_r_sandbox_env(),
+            preexec_fn=_limit_r_resources if os.name == "posix" else None
         )
         
         os.unlink(temp_r_script_path)
@@ -516,7 +608,7 @@ if (file.exists(plot_file)) {{
         os.unlink(temp_r_script_path)
         return {
             "success": False,
-            "error": "R script execution timed out (30s limit)",
+            "error": f"R script execution timed out ({R_TIMEOUT_SECONDS}s limit)",
             "return_code": -1
         }
     except Exception as e:
@@ -531,13 +623,13 @@ if (file.exists(plot_file)) {{
 @app.get("/plots/{filename}")
 async def get_plot(filename: str):
     """Serve plot images"""
-    plot_path = f"plots/{filename}"
-    if not os.path.exists(plot_path):
+    plot_path = resolve_inside(PLOTS_DIR, filename)
+    if plot_path.suffix.lower() != ".png" or not plot_path.is_file():
         raise HTTPException(status_code=404, detail="Plot not found")
     
     return FileResponse(plot_path, media_type="image/png")
 
-@app.get("/sessions/{session_id}/history")
+@app.get("/sessions/{session_id}/history", dependencies=[Depends(require_api_key)])
 async def get_chat_history(session_id: str):
     """Get chat history for a session"""
     if session_id not in chat_sessions:
@@ -545,12 +637,12 @@ async def get_chat_history(session_id: str):
     
     return {"history": chat_sessions[session_id]["chat_history"]}
 
-@app.get("/list-files")
+@app.get("/list-files", dependencies=[Depends(require_api_key)])
 async def list_uploaded_files():
     """List all uploaded CSV files"""
     try:
         files = []
-        upload_dir = Path("uploads")
+        upload_dir = UPLOAD_DIR
         
         for file_path in upload_dir.glob("*.csv"):
             stat = file_path.stat()
@@ -569,7 +661,7 @@ async def list_uploaded_files():
 from mcp_tools import setup_mcp_integration
 
 # Add MCP integration to your existing app
-mcp_setup_success = setup_mcp_integration(app, execute_r_code_internal, chat_sessions)
+mcp_setup_success = setup_mcp_integration(app, execute_r_code_internal, chat_sessions, auth_dependency=require_mcp_api_key)
 
 if mcp_setup_success:
     logger.info("✅ MCP endpoints available at: /mcp/tools, /mcp/call/{tool_name}, /mcp/info")
@@ -577,4 +669,5 @@ else:
     logger.warning("❌ MCP integration failed - continuing without MCP support")
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Localhost by default; set HOST=0.0.0.0 only behind authentication or a trusted network
+    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

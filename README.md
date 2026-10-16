@@ -55,7 +55,7 @@ The tool generates R code using Google's Gemini 2.0 Flash model, executes it, an
 
 6. **Run the application**
    ```bash
-   python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+   python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
    ```
 
 7. **Access the application**
@@ -95,11 +95,14 @@ The tool exposes R analysis capabilities through MCP endpoints:
 - `POST /mcp/call/get_basic_stats` - Calculate basic statistics
 - `GET /mcp/info` - Server information
 
+`/mcp/call/*` runs arbitrary R code, so it is disabled until `APP_API_KEY` is set and every call must send the key in the `X-API-Key` header.
+
 #### MCP Usage Example
 
 ```bash
 curl -X POST "http://localhost:8000/mcp/call/execute_r_code" \
      -H "Content-Type: application/json" \
+     -H "X-API-Key: $APP_API_KEY" \
      -d '{"code": "summary(mtcars)", "session_id": "test"}'
 ```
 
@@ -111,8 +114,20 @@ Create a `.env` file with:
 
 ```env
 GOOGLE_API_KEY=your_gemini_api_key_here
-LOG_LEVEL=INFO
+APP_API_KEY=change_me_to_a_long_random_string
+HOST=127.0.0.1
+PORT=8000
+R_TIMEOUT_SECONDS=30
+R_MAX_MEMORY_MB=2048
+R_MAX_FILE_MB=100
 ```
+
+| Variable | Purpose |
+|---|---|
+| `GOOGLE_API_KEY` | Gemini API key |
+| `APP_API_KEY` | Enables `/mcp/call/*` and, when set, is required (header `X-API-Key`) on `/upload-csv`, `/chat`, `/list-files` and `/sessions/*`. The web UI has a field for it. |
+| `HOST` / `PORT` | Bind address for `python main.py` (defaults to `127.0.0.1:8000`) |
+| `R_TIMEOUT_SECONDS`, `R_MAX_MEMORY_MB`, `R_MAX_FILE_MB` | CPU time, memory and output-file limits for each R run |
 
 ### Supported File Types
 
@@ -128,7 +143,7 @@ r-assistant-tool/
 ├── mcp_tools.py         # MCP integration tools
 ├── install_packages.R   # R package installation script
 ├── requirements.txt     # Python dependencies
-├── .env                 # Environment variables (create from .env.example)
+├── .env.example         # Template for .env (copy and fill in)
 ├── uploads/             # Uploaded CSV files
 ├── plots/               # Generated visualizations
 ├── results/             # Analysis results
@@ -168,7 +183,7 @@ r-assistant-tool/
 
 ### Running in Development Mode
 ```bash
-python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 ### Adding New MCP Tools
@@ -178,7 +193,7 @@ python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
 ## Limitations
 
-- R code execution has a 30-second timeout
+- R code execution has a 30-second timeout (configurable)
 - File uploads limited to 50MB
 - Sessions are stored in memory (not persistent across restarts)
 - MCP integration uses HTTP endpoints (not native MCP protocol)
@@ -188,10 +203,12 @@ python -m uvicorn main:app --reload --host 0.0.0.0 --port 8000
 **Warning**: This tool executes AI-generated R code automatically. Only use with trusted data sources and in controlled environments. 
 Consider implementing additional sandboxing for production use.
 
-- R code execution is not sandboxed
-- File system access is limited to designated directories
-- No authentication system implemented
-- Suitable for development and trusted environments only
+- The server binds to `127.0.0.1` by default; only expose it (`HOST=0.0.0.0`) with `APP_API_KEY` set
+- MCP code execution is off unless `APP_API_KEY` is set
+- Each R run gets CPU, memory and file-size limits and a minimal environment (API keys are not passed to R)
+- Uploaded file names are sanitised and plot/file paths are confined to their directories
+- Model and R output are HTML-escaped in the chat UI
+- R itself is **not** fully sandboxed: generated code can still call `system()` or read files the server user can read. For shared or public deployments, run the app in a container as an unprivileged user
 
 ## Contributing
 

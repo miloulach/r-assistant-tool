@@ -4,7 +4,8 @@ import tempfile
 import os
 import asyncio
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Callable
+from fastapi import Depends
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +104,9 @@ cat("Length:", length(data_vector), "\\n")
             }
 
 # Simple HTTP-based MCP interface (instead of stdio)
-def create_mcp_endpoints(app, r_tools: RAnalysisMCPTools):
+def create_mcp_endpoints(app, r_tools: RAnalysisMCPTools, auth_dependency: Optional[Callable] = None):
     """Add MCP-like endpoints to FastAPI app"""
+    call_dependencies = [Depends(auth_dependency)] if auth_dependency else []
     
     @app.get("/mcp/tools")
     async def list_mcp_tools():
@@ -137,7 +139,7 @@ def create_mcp_endpoints(app, r_tools: RAnalysisMCPTools):
             ]
         }
     
-    @app.post("/mcp/call/{tool_name}")
+    @app.post("/mcp/call/{tool_name}", dependencies=call_dependencies)
     async def call_mcp_tool(tool_name: str, arguments: dict):
         """Call an MCP tool"""
         try:
@@ -173,14 +175,14 @@ def create_mcp_endpoints(app, r_tools: RAnalysisMCPTools):
             "tools_count": 3
         }
 
-def setup_mcp_integration(app, execute_r_func, chat_sessions):
+def setup_mcp_integration(app, execute_r_func, chat_sessions, auth_dependency: Optional[Callable] = None):
     """Setup MCP integration with your FastAPI app"""
     try:
         # Create MCP tools
         r_tools = RAnalysisMCPTools(execute_r_func, chat_sessions)
         
         # Add MCP endpoints to your existing FastAPI app
-        create_mcp_endpoints(app, r_tools)
+        create_mcp_endpoints(app, r_tools, auth_dependency)
         
         logger.info("MCP integration setup complete - endpoints available at /mcp/*")
         return True

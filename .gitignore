@@ -1,2 +1,20 @@
-# Ignore sensitive environment variable files
+# Secrets
 .env
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# R
+Rplots.pdf
+.Rhistory
+.RData
+
+# Generated at runtime
+plots/
+results/
+temp/
+uploads/*
+!uploads/iris.csv
